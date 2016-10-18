@@ -37,6 +37,7 @@ typedef struct uthread_t{
     int kactive;
     int kmax;
     sem_t* q_mutex;
+    sem_t* a_mutex;
 } uthread_t;
 uthread_t* uthread_ptr;
 
@@ -68,8 +69,10 @@ void uthread_init(int numKernelThreads) {
     uthread_ptr->kactive = 1;
     uthread_ptr->kmax = numKernelThreads;
     uthread_ptr->q_mutex = (sem_t*)malloc(sizeof(sem_t));
+    uthread_ptr->a_mutex = (sem_t*)malloc(sizeof(sem_t));
     /* mutex is 1 for mutual exclusive access to thread queue */
     sem_init(uthread_ptr->q_mutex, 1, 1);
+    sem_init(uthread_ptr->a_mutex, 1, 1);
 
     uthread_ptr->q = uthread_q_init();
 }
@@ -84,8 +87,8 @@ int uthread_create(void (* func)()) {
     // initialize a context for the user thread
     t->ctx = (ucontext_t*)malloc(sizeof(ucontext_t));
     getcontext(t->ctx);
-    t->ctx->uc_stack.ss_sp = (void*)malloc(16*16384);
-    t->ctx->uc_stack.ss_size = 16*16384; 
+    t->ctx->uc_stack.ss_sp = (void*)malloc(10*16384);
+    t->ctx->uc_stack.ss_size = 10*16384; 
     makecontext(t->ctx,t->func,0);
 
     // place thread reference in the thread list
@@ -94,32 +97,43 @@ int uthread_create(void (* func)()) {
     uthread_ptr->size++;
 
     if (uthread_ptr->kactive < uthread_ptr->kmax){
-        sem_post(uthread_ptr->q_mutex);
+        //sem_post(uthread_ptr->q_mutex);
          // start a kernal thread if there are open, active threads
+        t->start = time(NULL);
         start_thread(t_index);
     } else {
-        sem_post(uthread_ptr->q_mutex);
         // place the context in the queue otherwise
         enqueue(uthread_ptr->q, t_index);
+        sem_post(uthread_ptr->q_mutex);
     }
 }
 
 void uthread_exit() {
     // if the queue is empty, we can exit the thread
+    sem_wait(uthread_ptr->q_mutex);
+    int t_index = get_uthread_from_pid(getpid());
+    if (t_index != -1) {
+        uthread* t = get_uthread(t_index);
+        t->pid = -1;
+        t->priority = -1;
+    }
     if (uthread_ptr->q->size == 0) {  
+        sem_post(uthread_ptr->q_mutex);
+        sem_wait(uthread_ptr->a_mutex);
         uthread_ptr->kactive--;
         // clean up if there are no more active kthreads
         // adds some instability and debug difficutly, so 
         // it's commented out
-        //if (uthread_ptr->kactive == 0) {
-        //    uthread_release();
-        //}
+        if (uthread_ptr->kactive == 0) {
+            uthread_release();
+        }
+        sem_post(uthread_ptr->a_mutex);
         exit(0);
     }
 
     // set a thread's id, and start time
-    uthread* t = get_uthread(dequeue(uthread_ptr->q));
-    sem_wait(uthread_ptr->q_mutex);
+    int index = dequeue(uthread_ptr->q);
+    uthread* t = get_uthread(index);
     t->pid = getpid();
     t->start = time(NULL);
     sem_post(uthread_ptr->q_mutex);
@@ -128,29 +142,31 @@ void uthread_exit() {
 }
 
 void uthread_yield() {
+    sem_wait(uthread_ptr->q_mutex);
     int t_index = get_uthread_from_pid(getpid());
     time_t y_time = time(NULL);
     if (t_index == -1) {
         // this *should* only happen if cloning or the queue get messed up
         printf("ERROR: no thread for pid %d\n",getpid());
+        sem_post(uthread_ptr->q_mutex);
         return;
     }
 
     // reset values of the current thread, for the queue
-    sem_wait(uthread_ptr->q_mutex);
+    
     uthread* t = get_uthread(t_index);
     t->pid = -1;
     t->priority += y_time - t->start;
-    sem_post(uthread_ptr->q_mutex);
     enqueue(uthread_ptr->q, t_index);
     // get the next highest priority thread and activate it
     int next_t_index = dequeue(uthread_ptr->q);
-    sem_wait(uthread_ptr->q_mutex);
     uthread* next_t = get_uthread(next_t_index);
     next_t->pid = getpid();
     next_t->start = y_time;
     sem_post(uthread_ptr->q_mutex);
-
+    if (t_index == next_t_index) {
+        return;
+    }
     // swap the current and next thread
     swapcontext(t->ctx,next_t->ctx);
 }
@@ -163,14 +179,11 @@ uthread* get_uthread(int t_index) {
 // searches through uthread references for one matching the
 // provided pid
 int get_uthread_from_pid(int pid) {
-    sem_wait(uthread_ptr->q_mutex);
     for (int i=0;i<uthread_ptr->size;i++) {
         if (get_uthread(i)->pid == pid) {
-            sem_post(uthread_ptr->q_mutex);
             return i;
         }
     }
-    sem_post(uthread_ptr->q_mutex);
     return -1;
 }
 
@@ -183,7 +196,6 @@ uthread_q* uthread_q_init(){
 
 void enqueue(uthread_q* q_ptr, int t_index) {
     // we can't add to a full queue
-    sem_wait(uthread_ptr->q_mutex);
     if (q_ptr->size >= q_ptr->max) {
         printf("ERROR: queue is full, increase DEFAULT_Q.\n");
         return;
@@ -199,34 +211,36 @@ void enqueue(uthread_q* q_ptr, int t_index) {
         i = parent;
         parent = (i-1)/2;
     }
-    sem_post(uthread_ptr->q_mutex);
 }
 
 int dequeue(uthread_q* q_ptr) {
     //empty queue is empty
-    sem_wait(uthread_ptr->q_mutex);
     if (q_ptr->size == 0){
         return -1;
     }
 
     // basic pop then percolate down based on priority
     int t_index = q_ptr->q[0];
-    q_ptr->q[0] = q_ptr->q[q_ptr->size-1];
     q_ptr->size--;
+    q_ptr->q[0] = q_ptr->q[q_ptr->size];
     int i=0;
-    while (i < q_ptr->size-1) {
-        if (q_ptr->size <= 2*i+2 && pri(q_ptr,i) > pri(q_ptr,2*i+1)) {
-            swap(q_ptr,i,2*i+1);
-            i=2*i+1;
-        }else if (pri(q_ptr,2*i+1) < pri(q_ptr,2*i+2)) {
-            swap(q_ptr,i,2*i+1);
-            i = 2*i+1;
-        }else{
-            swap(q_ptr,i,2*i+2);
-            i = 2*i+2;
+    while (i < q_ptr->size) {
+        if (2*i+1 >= q_ptr->size) {
+            break;
+        }
+        if (pri(q_ptr,i) < pri(q_ptr,2*i+1) && pri(q_ptr,i) < pri(q_ptr,2*i+2)){
+            break;
+        } else {
+            if (pri(q_ptr,2*i+1) < pri(q_ptr,2*i+2)){
+                swap(q_ptr,i,2*i+1);
+                i = 2*i+1;
+            } else {
+                swap(q_ptr,i,2*i+2);
+                i = 2*i+2;                
+            }
         }
     }
-    sem_post(uthread_ptr->q_mutex);
+
     return t_index;
 }
 
@@ -243,7 +257,7 @@ int pri(uthread_q* q_ptr, int i) {
 }
 
 void start_thread(int t_index) {
-    sem_wait(uthread_ptr->q_mutex);
+    //sem_wait(uthread_ptr->q_mutex);
     uthread* t = get_uthread(t_index);
     if (t->pid != -1) {
         /* t is already running */
@@ -251,14 +265,16 @@ void start_thread(int t_index) {
     }
 
     // this kthread is going to be active, so show it
+    sem_wait(uthread_ptr->a_mutex);
     uthread_ptr->kactive++;
+    sem_post(uthread_ptr->a_mutex);
     // create a new kthread to run this uthread
-    t->pid = clone((int(*)(void*))t->func, t->ctx->uc_stack.ss_sp,CLONE_VM, NULL);
     sem_post(uthread_ptr->q_mutex);
+    t->pid = clone((int(*)(void*))t->func, t->ctx->uc_stack.ss_sp+t->ctx->uc_stack.ss_size,CLONE_VM, NULL);
     if (t->pid == -1) {
         // some notification if we error when cloning
         printf("ERROR: failed to clone thread\n");
-        enqueue(uthread_ptr->q,t_index);
+        //enqueue(uthread_ptr->q,t_index);
         return;
     }
 }
@@ -270,6 +286,7 @@ void uthread_release() {
         free(uthread_ptr->threads[i]);
     }
     free(uthread_ptr->threads);
+    free(uthread_ptr->q_mutex);
     uthread_q_release(uthread_ptr->q);
     free(uthread_ptr);
 }

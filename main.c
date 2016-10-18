@@ -41,18 +41,23 @@ void th3()  {
 
 // provided example usage
 int main() {
-    uthread_init(2);
+    uthread_init(5);
     uthread_create(th1);
     uthread_create(th2);
     uthread_create(th3);
+    
     uthread_create(th1);
     uthread_create(th1);
     uthread_create(th2);
+
     uthread_create(th3);
     uthread_create(th1);
-    uthread_create(th2);
+    uthread_create(th1);
     uthread_create(th1);
     uthread_create(th2);
+
+    uthread_create(th3);
+    uthread_create(th1);    
     uthread_exit();
     return 0;
 }
