@@ -37,7 +37,6 @@ typedef struct uthread_t{
     int kactive;
     int kmax;
     sem_t* q_mutex;
-    sem_t* a_mutex;
 } uthread_t;
 uthread_t* uthread_ptr;
 
@@ -69,10 +68,8 @@ void uthread_init(int numKernelThreads) {
     uthread_ptr->kactive = 1;
     uthread_ptr->kmax = numKernelThreads;
     uthread_ptr->q_mutex = (sem_t*)malloc(sizeof(sem_t));
-    uthread_ptr->a_mutex = (sem_t*)malloc(sizeof(sem_t));
     /* mutex is 1 for mutual exclusive access to thread queue */
     sem_init(uthread_ptr->q_mutex, 1, 1);
-    sem_init(uthread_ptr->a_mutex, 1, 1);
 
     uthread_ptr->q = uthread_q_init();
 }
@@ -97,7 +94,6 @@ int uthread_create(void (* func)()) {
     uthread_ptr->size++;
 
     if (uthread_ptr->kactive < uthread_ptr->kmax){
-        //sem_post(uthread_ptr->q_mutex);
          // start a kernal thread if there are open, active threads
         t->start = time(NULL);
         start_thread(t_index);
@@ -119,7 +115,6 @@ void uthread_exit() {
     }
     if (uthread_ptr->q->size == 0) {  
         sem_post(uthread_ptr->q_mutex);
-        sem_wait(uthread_ptr->a_mutex);
         uthread_ptr->kactive--;
         // clean up if there are no more active kthreads
         // adds some instability and debug difficutly, so 
@@ -127,7 +122,6 @@ void uthread_exit() {
         if (uthread_ptr->kactive == 0) {
             uthread_release();
         }
-        sem_post(uthread_ptr->a_mutex);
         exit(0);
     }
 
@@ -265,9 +259,7 @@ void start_thread(int t_index) {
     }
 
     // this kthread is going to be active, so show it
-    sem_wait(uthread_ptr->a_mutex);
     uthread_ptr->kactive++;
-    sem_post(uthread_ptr->a_mutex);
     // create a new kthread to run this uthread
     sem_post(uthread_ptr->q_mutex);
     t->pid = clone((int(*)(void*))t->func, t->ctx->uc_stack.ss_sp+t->ctx->uc_stack.ss_size,CLONE_VM, NULL);
